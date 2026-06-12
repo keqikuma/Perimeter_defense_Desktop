@@ -1,0 +1,9 @@
+connection:
+  host: 192.168.1.201
+  port: 9000
+timeouts:
+  connect_sec: 5.0
+  response_sec: 15.0
+polling:
+  temperature_sec: 3.0
+  status_sec: 5.0
