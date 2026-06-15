@@ -45,12 +45,12 @@ class MainWindow(QMainWindow):
         self._worker.bind_bridge(self._task_bridge)
         self._worker_thread.start()
         self._setup_worker_signals()
-        self._setup_ui_logging()
 
         self._connected = False
         self._busy = False
 
         self._build_ui()
+        self._setup_ui_logging()
         self._apply_config_to_form()
         self._set_control_enabled(False)
 
@@ -256,6 +256,9 @@ class MainWindow(QMainWindow):
         box = QGroupBox("运行日志")
         layout = QVBoxLayout(box)
 
+        self.log_view = QTextEdit()
+        self.log_view.setReadOnly(True)
+
         toolbar = QHBoxLayout()
         self.log_path_label = QLabel("日志文件: --")
         self.log_path_label.setStyleSheet("color: #666;")
@@ -269,9 +272,6 @@ class MainWindow(QMainWindow):
         self.clear_log_btn.clicked.connect(self.log_view.clear)
         toolbar.addWidget(self.clear_log_btn)
         layout.addLayout(toolbar)
-
-        self.log_view = QTextEdit()
-        self.log_view.setReadOnly(True)
         layout.addWidget(self.log_view)
         return box
 
