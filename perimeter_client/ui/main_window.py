@@ -18,9 +18,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from perimeter_client.config import AppConfig, default_config_path, load_config, save_config
+from perimeter_client.config import AppConfig, load_config, save_config
 from perimeter_client.ui.widgets import StatusLight
-from perimeter_client.ui.worker import GatewayWorker, run_in_thread
+from perimeter_client.ui.worker import GatewayWorker, TaskBridge
 
 
 class MainWindow(QMainWindow):
@@ -31,7 +31,13 @@ class MainWindow(QMainWindow):
 
         self._config = load_config()
         self._worker = GatewayWorker(self._config)
-        self._thread: QThread | None = None
+        self._task_bridge = TaskBridge()
+        self._worker_thread = QThread()
+        self._worker.moveToThread(self._worker_thread)
+        self._worker.bind_bridge(self._task_bridge)
+        self._worker_thread.start()
+        self._setup_worker_signals()
+
         self._connected = False
         self._busy = False
 
@@ -43,6 +49,17 @@ class MainWindow(QMainWindow):
         self._temp_timer.timeout.connect(self._poll_temperature)
         self._status_timer = QTimer(self)
         self._status_timer.timeout.connect(self._poll_strike_status)
+
+    def _setup_worker_signals(self) -> None:
+        self._worker.finished.connect(self._on_worker_finished)
+        self._worker.failed.connect(self._on_worker_failed)
+        self._worker.connected.connect(self._on_connected)
+        self._worker.disconnected.connect(self._on_disconnected)
+        self._worker.ip_scanned.connect(self._on_ip_scanned)
+        self._worker.ip_applied.connect(self._on_ip_applied)
+        self._worker.strike_changed.connect(self._on_strike_changed)
+        self._worker.temperature_updated.connect(self._on_temperature_updated)
+        self._worker.command_done.connect(self._on_command_done)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -261,26 +278,19 @@ class MainWindow(QMainWindow):
     def _on_save_config(self) -> None:
         self._config = self._read_form_config()
         path = save_config(self._config)
-        self._worker.update_config(self._config)
+        self._task_bridge.submit.emit("update_config", "", 0, self._config)
         self._log(f"配置已保存: {path}")
 
-    def _run_worker(self, slot) -> None:
+    def _run_worker(self, task: str, args: object = None) -> None:
         if self._busy:
             return
         self._set_busy(True)
-        self._worker.update_target(
-            self.host_input.text().strip(),
-            self.port_input.value(),
-        )
-        self._thread = run_in_thread(self._worker, slot)
-        self._worker.finished.connect(self._on_worker_finished)
+        host = self.host_input.text().strip()
+        port = self.port_input.value()
+        self._task_bridge.submit.emit(task, host, port, args)
 
     def _on_worker_finished(self) -> None:
         self._set_busy(False)
-        if self._thread is not None:
-            self._thread.quit()
-            self._thread.wait()
-            self._thread = None
 
     def _on_scan_ip(self) -> None:
         host = self.host_input.text().strip()
@@ -288,12 +298,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先填写网关地址")
             return
         self._log(f"正在扫描网关 IP: {host}:{self.port_input.value()}")
-        self._worker.ip_scanned.connect(self._on_ip_scanned)
-        self._worker.failed.connect(self._on_worker_failed)
-        self._run_worker(self._worker.scan_ip)
+        self._run_worker("scan_ip")
 
     def _on_ip_scanned(self, ip: str, prefix: int) -> None:
-        self._worker.ip_scanned.disconnect(self._on_ip_scanned)
         text = f"当前网关 IP：{ip}/{prefix}"
         self.scanned_ip_label.setText(text)
         self.host_input.setText(ip)
@@ -305,12 +312,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请先扫描或填写网关地址")
             return
         self._log(f"正在连接: {host}:{self.port_input.value()}")
-        self._worker.connected.connect(self._on_connected)
-        self._worker.failed.connect(self._on_worker_failed)
-        self._run_worker(self._worker.connect_gateway)
+        self._run_worker("connect")
 
     def _on_connected(self) -> None:
-        self._worker.connected.disconnect(self._on_connected)
         self._connected = True
         self.conn_status_label.setText("已连接")
         self.conn_status_label.setStyleSheet("color: #2E7D32; font-weight: bold;")
@@ -324,11 +328,9 @@ class MainWindow(QMainWindow):
     def _on_disconnect(self) -> None:
         self._temp_timer.stop()
         self._status_timer.stop()
-        self._worker.disconnected.connect(self._on_disconnected)
-        self._run_worker(self._worker.disconnect_gateway)
+        self._run_worker("disconnect")
 
     def _on_disconnected(self) -> None:
-        self._worker.disconnected.disconnect(self._on_disconnected)
         self._connected = False
         self.conn_status_label.setText("未连接")
         self.conn_status_label.setStyleSheet("")
@@ -337,55 +339,39 @@ class MainWindow(QMainWindow):
         self._set_control_enabled(False)
         self._log("已断开连接")
 
-    def _run_command(self, action: str, slot) -> None:
+    def _run_command(self, action: str, task: str) -> None:
         self._log(f"发送指令: {action}")
-        self._worker.command_done.connect(self._on_command_done)
-        self._worker.failed.connect(self._on_worker_failed)
-        self._run_worker(slot)
+        self._run_worker(task)
 
     def _on_command_done(self, action: str, payload_hex: str) -> None:
-        try:
-            self._worker.command_done.disconnect(self._on_command_done)
-        except TypeError:
-            pass
         self._log(f"{action} 成功，回包: {payload_hex}")
 
     def _on_power_on(self) -> None:
-        self._run_command("开启电源 (0x01)", self._worker.power_on)
+        self._run_command("开启电源 (0x01)", "power_on")
 
     def _on_power_off(self) -> None:
-        self._run_command("关闭电源 (0x02)", self._worker.power_off)
+        self._run_command("关闭电源 (0x02)", "power_off")
 
     def _on_ac_on(self) -> None:
-        self._run_command("空调开启 (0x12)", self._worker.ac_on)
+        self._run_command("空调开启 (0x12)", "ac_on")
 
     def _on_ac_off(self) -> None:
-        self._run_command("空调关闭 (0x13)", self._worker.ac_off)
+        self._run_command("空调关闭 (0x13)", "ac_off")
 
     def _on_strike_on(self) -> None:
         self._log("发送指令: 打击开启")
-        self._worker.strike_changed.connect(self._on_strike_changed)
-        self._worker.failed.connect(self._on_worker_failed)
-        self._run_worker(self._worker.strike_on)
+        self._run_worker("strike_on")
 
     def _on_strike_off(self) -> None:
         self._log("发送指令: 打击关闭")
-        self._worker.strike_changed.connect(self._on_strike_changed)
-        self._worker.failed.connect(self._on_worker_failed)
-        self._run_worker(self._worker.strike_off)
+        self._run_worker("strike_off")
 
     def _poll_strike_status(self) -> None:
         if not self._connected or self._busy:
             return
-        self._worker.strike_changed.connect(self._on_strike_changed)
-        self._worker.failed.connect(self._on_worker_failed)
-        self._run_worker(self._worker.query_strike_status)
+        self._run_worker("query_strike")
 
     def _on_strike_changed(self, is_on: bool) -> None:
-        try:
-            self._worker.strike_changed.disconnect(self._on_strike_changed)
-        except TypeError:
-            pass
         if is_on:
             self.strike_light.set_state(StatusLight.ON)
             self.strike_text.setText("打击已开启")
@@ -405,15 +391,9 @@ class MainWindow(QMainWindow):
     def _poll_temperature(self) -> None:
         if not self._connected or self._busy:
             return
-        self._worker.temperature_updated.connect(self._on_temperature_updated)
-        self._worker.failed.connect(self._on_worker_failed)
-        self._run_worker(self._worker.query_temperature)
+        self._run_worker("query_temperature")
 
     def _on_temperature_updated(self, temp: float) -> None:
-        try:
-            self._worker.temperature_updated.disconnect(self._on_temperature_updated)
-        except TypeError:
-            pass
         self.temp_label.setText(f"{temp:.1f}")
         self._log(f"设备仓温度: {temp:.1f} ℃")
 
@@ -432,12 +412,9 @@ class MainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
         self._log(f"发送指令: 设置 IP {new_ip}/{prefix}")
-        self._worker.ip_applied.connect(self._on_ip_applied)
-        self._worker.failed.connect(self._on_worker_failed)
-        self._run_worker(lambda: self._worker.apply_gateway_ip(new_ip, prefix))
+        self._run_worker("apply_ip", (new_ip, prefix))
 
     def _on_ip_applied(self, ip: str, prefix: int) -> None:
-        self._worker.ip_applied.disconnect(self._on_ip_applied)
         self.scanned_ip_label.setText(f"当前网关 IP：{ip}/{prefix}（已应用，请重连）")
         self._log(f"IP 设置成功: {ip}/{prefix}，请重启网关后用新 IP 扫描并连接")
         QMessageBox.information(
@@ -448,26 +425,15 @@ class MainWindow(QMainWindow):
         )
 
     def _on_worker_failed(self, message: str) -> None:
-        for signal, slot in (
-            (self._worker.failed, self._on_worker_failed),
-            (self._worker.command_done, self._on_command_done),
-            (self._worker.strike_changed, self._on_strike_changed),
-            (self._worker.temperature_updated, self._on_temperature_updated),
-            (self._worker.ip_applied, self._on_ip_applied),
-            (self._worker.ip_scanned, self._on_ip_scanned),
-            (self._worker.connected, self._on_connected),
-            (self._worker.disconnected, self._on_disconnected),
-        ):
-            try:
-                signal.disconnect(slot)
-            except TypeError:
-                pass
         self._log(f"错误: {message}")
         QMessageBox.warning(self, "操作失败", message)
 
     def closeEvent(self, event) -> None:
         self._temp_timer.stop()
         self._status_timer.stop()
-        if self._worker.is_connected:
-            self._worker.disconnect_gateway()
+        if self._connected:
+            self._task_bridge.submit.emit("disconnect", "", 0, None)
+            self._worker_thread.wait(3000)
+        self._worker_thread.quit()
+        self._worker_thread.wait()
         event.accept()

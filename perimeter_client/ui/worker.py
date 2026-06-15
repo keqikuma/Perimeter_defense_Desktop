@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 
 from perimeter_client.client import GatewayClient, GatewayError
 from perimeter_client.config import AppConfig
+
+
+class TaskBridge(QObject):
+    """主线程通过此对象向 Worker 线程投递任务。"""
+
+    submit = pyqtSignal(str, str, int, object)
 
 
 class GatewayWorker(QObject):
@@ -26,17 +32,61 @@ class GatewayWorker(QObject):
         self._host = config.host
         self._port = config.port
 
-    def update_target(self, host: str, port: int) -> None:
-        self._host = host
-        self._port = port
-
-    def update_config(self, config: AppConfig) -> None:
-        self._config = config
-        self._client = GatewayClient(config)
-
     @property
     def is_connected(self) -> bool:
         return self._client.connected
+
+    def bind_bridge(self, bridge: TaskBridge) -> None:
+        bridge.submit.connect(self._dispatch_task, Qt.ConnectionType.QueuedConnection)
+
+    def _dispatch_task(
+        self, task: str, host: str, port: int, args: object
+    ) -> None:
+        if host:
+            self._host = host
+        if port > 0:
+            self._port = port
+
+        if task == "update_config":
+            self._apply_config(args)
+            self.finished.emit()
+            return
+
+        handlers = {
+            "scan_ip": lambda: self.scan_ip(),
+            "connect": lambda: self.connect_gateway(),
+            "disconnect": lambda: self.disconnect_gateway(),
+            "power_on": lambda: self.power_on(),
+            "power_off": lambda: self.power_off(),
+            "strike_on": lambda: self.strike_on(),
+            "strike_off": lambda: self.strike_off(),
+            "query_strike": lambda: self.query_strike_status(),
+            "query_temperature": lambda: self.query_temperature(),
+            "ac_on": lambda: self.ac_on(),
+            "ac_off": lambda: self.ac_off(),
+            "apply_ip": lambda: self._apply_ip(args),
+        }
+        handler = handlers.get(task)
+        if handler is None:
+            self.failed.emit(f"未知任务: {task}")
+            self.finished.emit()
+            return
+        handler()
+
+    def _apply_config(self, args: object) -> None:
+        if not isinstance(args, AppConfig):
+            self.failed.emit("配置参数无效")
+            return
+        self._config = args
+        self._client = GatewayClient(args)
+
+    def _apply_ip(self, args: object) -> None:
+        if not isinstance(args, tuple) or len(args) != 2:
+            self.failed.emit("IP 参数无效")
+            self.finished.emit()
+            return
+        ip, prefix_len = args
+        self.apply_gateway_ip(str(ip), int(prefix_len))
 
     def scan_ip(self) -> None:
         try:
@@ -143,12 +193,3 @@ class GatewayWorker(QObject):
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
-
-
-def run_in_thread(worker: GatewayWorker, slot) -> QThread:
-    thread = QThread()
-    worker.moveToThread(thread)
-    thread.started.connect(slot)
-    thread.finished.connect(worker.deleteLater)
-    thread.start()
-    return thread
