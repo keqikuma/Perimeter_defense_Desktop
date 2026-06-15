@@ -6,6 +6,9 @@ from PyQt6.QtCore import QObject, Qt, pyqtSignal
 
 from perimeter_client.client import GatewayClient, GatewayError
 from perimeter_client.config import AppConfig
+from perimeter_client.logging import get_logger
+
+logger = get_logger("worker")
 
 
 class TaskBridge(QObject):
@@ -47,6 +50,8 @@ class GatewayWorker(QObject):
         if port > 0:
             self._port = port
 
+        logger.info("开始任务: %s host=%s port=%s", task, host or self._host, port or self._port)
+
         if task == "update_config":
             self._apply_config(args)
             self.finished.emit()
@@ -68,6 +73,7 @@ class GatewayWorker(QObject):
         }
         handler = handlers.get(task)
         if handler is None:
+            logger.error("未知任务: %s", task)
             self.failed.emit(f"未知任务: {task}")
             self.finished.emit()
             return
@@ -93,6 +99,7 @@ class GatewayWorker(QObject):
             ip, prefix = self._client.query_gateway_ip(self._host, self._port)
             self.ip_scanned.emit(ip, prefix)
         except GatewayError as exc:
+            logger.error("任务失败: %s", exc)
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
@@ -102,6 +109,7 @@ class GatewayWorker(QObject):
             self._client.connect(self._host, self._port)
             self.connected.emit()
         except GatewayError as exc:
+            logger.error("任务失败: %s", exc)
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
@@ -116,6 +124,7 @@ class GatewayWorker(QObject):
             payload = self._client.power_on()
             self.command_done.emit("电源开启", payload.hex().upper())
         except GatewayError as exc:
+            logger.error("任务失败: %s", exc)
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
@@ -125,6 +134,7 @@ class GatewayWorker(QObject):
             payload = self._client.power_off()
             self.command_done.emit("电源关闭", payload.hex().upper())
         except GatewayError as exc:
+            logger.error("任务失败: %s", exc)
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
@@ -135,6 +145,7 @@ class GatewayWorker(QObject):
             status = self._client.query_signal_status()
             self.strike_changed.emit(status)
         except GatewayError as exc:
+            logger.error("任务失败: %s", exc)
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
@@ -145,6 +156,7 @@ class GatewayWorker(QObject):
             status = self._client.query_signal_status()
             self.strike_changed.emit(status)
         except GatewayError as exc:
+            logger.error("任务失败: %s", exc)
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
@@ -154,6 +166,7 @@ class GatewayWorker(QObject):
             status = self._client.query_signal_status()
             self.strike_changed.emit(status)
         except GatewayError as exc:
+            logger.error("任务失败: %s", exc)
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
@@ -163,6 +176,7 @@ class GatewayWorker(QObject):
             temp = self._client.query_temperature()
             self.temperature_updated.emit(temp)
         except GatewayError as exc:
+            logger.error("任务失败: %s", exc)
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
@@ -172,6 +186,7 @@ class GatewayWorker(QObject):
             payload = self._client.ac_on()
             self.command_done.emit("空调开启", payload.hex().upper())
         except GatewayError as exc:
+            logger.error("任务失败: %s", exc)
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
@@ -181,6 +196,7 @@ class GatewayWorker(QObject):
             payload = self._client.ac_off()
             self.command_done.emit("空调关闭", payload.hex().upper())
         except GatewayError as exc:
+            logger.error("任务失败: %s", exc)
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()
@@ -190,6 +206,7 @@ class GatewayWorker(QObject):
             new_ip, new_prefix = self._client.set_gateway_ip(ip, prefix_len)
             self.ip_applied.emit(new_ip, new_prefix)
         except GatewayError as exc:
+            logger.error("任务失败: %s", exc)
             self.failed.emit(str(exc))
         finally:
             self.finished.emit()

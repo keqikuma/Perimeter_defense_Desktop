@@ -6,13 +6,17 @@ import socket
 import threading
 
 from perimeter_client.config import AppConfig
+from perimeter_client.logging import format_hex, get_logger
 from perimeter_client.protocol.frame import Command, FrameBuffer, ResponseFrame, build_request
+from perimeter_client.protocol.names import cmd_name
 from perimeter_client.protocol.payload import (
     decode_ip_payload,
     encode_ip_payload,
     parse_signal_status,
     parse_temperature,
 )
+
+logger = get_logger("tcp")
 
 
 class GatewayError(Exception):
@@ -27,6 +31,7 @@ class GatewayClient:
         self._sock: socket.socket | None = None
         self._buffer = FrameBuffer()
         self._lock = threading.Lock()
+        self._peer = ""
 
     @property
     def connected(self) -> bool:
@@ -36,21 +41,26 @@ class GatewayClient:
         self.disconnect()
         target_host = host or self._config.host
         target_port = port or self._config.port
+        self._peer = f"{target_host}:{target_port}"
 
+        logger.info("正在连接网关 %s", self._peer)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(self._config.connect_timeout_sec)
         try:
             sock.connect((target_host, target_port))
         except OSError as exc:
             sock.close()
+            logger.error("连接失败 %s: %s", self._peer, exc)
             raise GatewayError(f"连接失败: {exc}") from exc
 
         sock.settimeout(self._config.response_timeout_sec)
         self._sock = sock
         self._buffer = FrameBuffer()
+        logger.info("网关连接成功 %s", self._peer)
 
     def disconnect(self) -> None:
         if self._sock is not None:
+            logger.info("断开网关连接 %s", self._peer or "未知地址")
             try:
                 self._sock.shutdown(socket.SHUT_RDWR)
             except OSError:
@@ -61,6 +71,7 @@ class GatewayClient:
                 pass
         self._sock = None
         self._buffer = FrameBuffer()
+        self._peer = ""
 
     def send_command(
         self,
@@ -88,11 +99,26 @@ class GatewayClient:
             raise GatewayError("未连接网关")
 
         request = build_request(cmd, payload)
+        logger.debug(
+            ">>> CMD=0x%02X %s | %s",
+            cmd,
+            cmd_name(cmd),
+            format_hex(request),
+        )
         try:
             self._sock.sendall(request)
-            return self._read_response(cmd)
+            frame = self._read_response(cmd)
+            logger.debug(
+                "<<< CMD=0x%02X %s STATUS=%s PAYLOAD=%s",
+                frame.cmd,
+                cmd_name(frame.cmd),
+                frame.status_name,
+                format_hex(frame.payload) if frame.payload else "(空)",
+            )
+            return frame
         except OSError as exc:
             self.disconnect()
+            logger.error("通信异常 CMD=0x%02X %s: %s", cmd, cmd_name(cmd), exc)
             raise GatewayError(f"通信异常: {exc}") from exc
 
     def _read_response(self, expected_cmd: int) -> ResponseFrame:
@@ -103,16 +129,38 @@ class GatewayClient:
             try:
                 chunk = self._sock.recv(4096)
             except socket.timeout as exc:
+                logger.error(
+                    "等待响应超时 CMD=0x%02X %s",
+                    expected_cmd,
+                    cmd_name(expected_cmd),
+                )
                 raise GatewayError("等待响应超时") from exc
 
             if not chunk:
                 self.disconnect()
+                logger.error(
+                    "连接已断开 CMD=0x%02X %s",
+                    expected_cmd,
+                    cmd_name(expected_cmd),
+                )
                 raise GatewayError("连接已断开")
 
+            logger.debug("收到原始数据 %d 字节 | %s", len(chunk), format_hex(chunk))
             for frame in self._buffer.feed(chunk):
                 if frame.cmd != expected_cmd:
+                    logger.warning(
+                        "忽略非预期响应 CMD=0x%02X，期望 0x%02X",
+                        frame.cmd,
+                        expected_cmd,
+                    )
                     continue
                 if not frame.ok:
+                    logger.error(
+                        "指令失败 CMD=0x%02X %s STATUS=%s",
+                        frame.cmd,
+                        cmd_name(frame.cmd),
+                        frame.status_name,
+                    )
                     raise GatewayError(frame.status_name, frame)
                 return frame
 
@@ -123,45 +171,60 @@ class GatewayClient:
             host=host,
             port=port,
         )
-        return decode_ip_payload(frame.payload)
+        ip, prefix = decode_ip_payload(frame.payload)
+        logger.info("查询网关 IP 成功: %s/%d", ip, prefix)
+        return ip, prefix
 
     def set_gateway_ip(self, ip: str, prefix_len: int) -> tuple[str, int]:
         payload = encode_ip_payload(ip, prefix_len)
+        logger.info("设置网关 IP: %s/%d", ip, prefix_len)
         frame = self.send_command(Command.SET_IP, payload)
-        return decode_ip_payload(frame.payload)
+        new_ip, new_prefix = decode_ip_payload(frame.payload)
+        logger.info("设置网关 IP 成功: %s/%d", new_ip, new_prefix)
+        return new_ip, new_prefix
 
     def power_on(self) -> bytes:
         frame = self.send_command(Command.POWER_ON)
+        logger.info("电源开启成功")
         return frame.payload
 
     def power_off(self) -> bytes:
         frame = self.send_command(Command.POWER_OFF)
+        logger.info("电源关闭成功")
         return frame.payload
 
     def signal_on(self) -> None:
         self.send_command(Command.SIGNAL_ON)
+        logger.info("打击信号打开成功")
 
     def signal_off(self) -> None:
         self.send_command(Command.SIGNAL_OFF)
+        logger.info("打击信号关闭成功")
 
     def query_signal_status(self) -> bool:
         frame = self.send_command(Command.QUERY_SIGNAL)
         status = parse_signal_status(frame.payload)
         if status is None:
+            logger.error("无法解析打击状态，PAYLOAD=%s", format_hex(frame.payload))
             raise GatewayError("无法解析打击状态", frame)
+        logger.info("打击状态: %s", "开启" if status else "关闭")
         return status
 
     def query_temperature(self) -> float:
         frame = self.send_command(Command.TEMPERATURE)
         temp = parse_temperature(frame.payload)
         if temp is None:
+            logger.error("无法解析温度，PAYLOAD=%s", format_hex(frame.payload))
             raise GatewayError("无法解析温度数据", frame)
+        logger.info("设备仓温度: %.1f ℃", temp)
         return temp
 
     def ac_on(self) -> bytes:
         frame = self.send_command(Command.AC_ON)
+        logger.info("空调开启成功")
         return frame.payload
 
     def ac_off(self) -> bytes:
         frame = self.send_command(Command.AC_OFF)
+        logger.info("空调关闭成功")
         return frame.payload

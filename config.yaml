@@ -7,3 +7,8 @@ timeouts:
 polling:
   temperature_sec: 3.0
   status_sec: 5.0
+logging:
+  level: DEBUG
+  ui_level: INFO
+  directory: logs
+  backup_count: 7

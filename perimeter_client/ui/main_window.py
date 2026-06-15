@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QThread, QTimer
+import logging
+
+from PyQt6.QtCore import Qt, QThread, QTimer, QUrl
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QFormLayout,
     QGroupBox,
@@ -19,8 +22,13 @@ from PyQt6.QtWidgets import (
 )
 
 from perimeter_client.config import AppConfig, load_config, save_config
+from perimeter_client.logging import get_logger, log_file_path
+from perimeter_client.paths import app_base_dir
+from perimeter_client.ui.log_handler import LogEmitter, QtLogHandler
 from perimeter_client.ui.widgets import StatusLight
 from perimeter_client.ui.worker import GatewayWorker, TaskBridge
+
+logger = get_logger("ui")
 
 
 class MainWindow(QMainWindow):
@@ -37,6 +45,7 @@ class MainWindow(QMainWindow):
         self._worker.bind_bridge(self._task_bridge)
         self._worker_thread.start()
         self._setup_worker_signals()
+        self._setup_ui_logging()
 
         self._connected = False
         self._busy = False
@@ -60,6 +69,22 @@ class MainWindow(QMainWindow):
         self._worker.strike_changed.connect(self._on_strike_changed)
         self._worker.temperature_updated.connect(self._on_temperature_updated)
         self._worker.command_done.connect(self._on_command_done)
+
+    def _setup_ui_logging(self) -> None:
+        self._log_emitter = LogEmitter()
+        self._log_emitter.message.connect(self._append_log_line)
+
+        ui_level = getattr(logging, self._config.log_ui_level.upper(), logging.INFO)
+        qt_handler = QtLogHandler(self._log_emitter, ui_level)
+        logging.getLogger("perimeter_client").addHandler(qt_handler)
+
+        log_path = log_file_path()
+        if log_path is not None:
+            self.log_path_label.setText(f"日志文件: {log_path}")
+            logger.info("界面日志已启用，文件日志: %s", log_path)
+
+    def _append_log_line(self, message: str) -> None:
+        self.log_view.append(message)
 
     def _build_ui(self) -> None:
         central = QWidget()
@@ -228,8 +253,23 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_log_group(self) -> QGroupBox:
-        box = QGroupBox("通信日志")
+        box = QGroupBox("运行日志")
         layout = QVBoxLayout(box)
+
+        toolbar = QHBoxLayout()
+        self.log_path_label = QLabel("日志文件: --")
+        self.log_path_label.setStyleSheet("color: #666;")
+        toolbar.addWidget(self.log_path_label, stretch=1)
+
+        self.open_log_dir_btn = QPushButton("打开日志目录")
+        self.open_log_dir_btn.clicked.connect(self._on_open_log_dir)
+        toolbar.addWidget(self.open_log_dir_btn)
+
+        self.clear_log_btn = QPushButton("清空界面")
+        self.clear_log_btn.clicked.connect(self.log_view.clear)
+        toolbar.addWidget(self.clear_log_btn)
+        layout.addLayout(toolbar)
+
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         layout.addWidget(self.log_view)
@@ -247,7 +287,17 @@ class MainWindow(QMainWindow):
             response_timeout_sec=self._config.response_timeout_sec,
             temperature_poll_interval_sec=self._config.temperature_poll_interval_sec,
             status_poll_interval_sec=self._config.status_poll_interval_sec,
+            log_level=self._config.log_level,
+            log_ui_level=self._config.log_ui_level,
+            log_directory=self._config.log_directory,
+            log_backup_count=self._config.log_backup_count,
         )
+
+    def _on_open_log_dir(self) -> None:
+        log_dir = app_base_dir() / self._config.log_directory
+        log_dir.mkdir(parents=True, exist_ok=True)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_dir.resolve())))
+        logger.info("打开日志目录: %s", log_dir)
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -272,14 +322,11 @@ class MainWindow(QMainWindow):
         ):
             w.setEnabled(enabled)
 
-    def _log(self, message: str) -> None:
-        self.log_view.append(message)
-
     def _on_save_config(self) -> None:
         self._config = self._read_form_config()
         path = save_config(self._config)
         self._task_bridge.submit.emit("update_config", "", 0, self._config)
-        self._log(f"配置已保存: {path}")
+        logger.info("配置已保存: %s", path)
 
     def _run_worker(self, task: str, args: object = None) -> None:
         if self._busy:
@@ -297,21 +344,21 @@ class MainWindow(QMainWindow):
         if not host:
             QMessageBox.warning(self, "提示", "请先填写网关地址")
             return
-        self._log(f"正在扫描网关 IP: {host}:{self.port_input.value()}")
+        logger.info("正在扫描网关 IP: %s:%s", host, self.port_input.value())
         self._run_worker("scan_ip")
 
     def _on_ip_scanned(self, ip: str, prefix: int) -> None:
         text = f"当前网关 IP：{ip}/{prefix}"
         self.scanned_ip_label.setText(text)
         self.host_input.setText(ip)
-        self._log(f"扫描成功: {ip}/{prefix}")
+        logger.info("扫描成功: %s/%s", ip, prefix)
 
     def _on_connect(self) -> None:
         host = self.host_input.text().strip()
         if not host:
             QMessageBox.warning(self, "提示", "请先扫描或填写网关地址")
             return
-        self._log(f"正在连接: {host}:{self.port_input.value()}")
+        logger.info("正在连接: %s:%s", host, self.port_input.value())
         self._run_worker("connect")
 
     def _on_connected(self) -> None:
@@ -319,7 +366,7 @@ class MainWindow(QMainWindow):
         self.conn_status_label.setText("已连接")
         self.conn_status_label.setStyleSheet("color: #2E7D32; font-weight: bold;")
         self._set_control_enabled(True)
-        self._log("网关连接成功")
+        logger.info("网关连接成功，控制面板已解锁")
         self._poll_strike_status()
         self._poll_temperature()
         self._temp_timer.start(int(self._config.temperature_poll_interval_sec * 1000))
@@ -337,14 +384,14 @@ class MainWindow(QMainWindow):
         self._set_strike_unknown()
         self.temp_label.setText("--")
         self._set_control_enabled(False)
-        self._log("已断开连接")
+        logger.info("已断开连接")
 
     def _run_command(self, action: str, task: str) -> None:
-        self._log(f"发送指令: {action}")
+        logger.info("用户操作: %s", action)
         self._run_worker(task)
 
     def _on_command_done(self, action: str, payload_hex: str) -> None:
-        self._log(f"{action} 成功，回包: {payload_hex}")
+        logger.info("%s 成功，南向回包: %s", action, payload_hex)
 
     def _on_power_on(self) -> None:
         self._run_command("开启电源 (0x01)", "power_on")
@@ -359,11 +406,11 @@ class MainWindow(QMainWindow):
         self._run_command("空调关闭 (0x13)", "ac_off")
 
     def _on_strike_on(self) -> None:
-        self._log("发送指令: 打击开启")
+        logger.info("用户操作: 打击开启")
         self._run_worker("strike_on")
 
     def _on_strike_off(self) -> None:
-        self._log("发送指令: 打击关闭")
+        logger.info("用户操作: 打击关闭")
         self._run_worker("strike_off")
 
     def _poll_strike_status(self) -> None:
@@ -381,7 +428,7 @@ class MainWindow(QMainWindow):
             self.strike_text.setText("打击已关闭")
             self.strike_text.setStyleSheet("color: #C62828; font-weight: bold;")
         state = "开启" if is_on else "关闭"
-        self._log(f"打击状态: {state}")
+        logger.debug("界面更新打击状态: %s", state)
 
     def _set_strike_unknown(self) -> None:
         self.strike_light.set_state(StatusLight.UNKNOWN)
@@ -395,7 +442,7 @@ class MainWindow(QMainWindow):
 
     def _on_temperature_updated(self, temp: float) -> None:
         self.temp_label.setText(f"{temp:.1f}")
-        self._log(f"设备仓温度: {temp:.1f} ℃")
+        logger.debug("界面更新温度: %.1f ℃", temp)
 
     def _on_apply_ip(self) -> None:
         new_ip = self.new_ip_input.text().strip()
@@ -411,12 +458,12 @@ class MainWindow(QMainWindow):
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        self._log(f"发送指令: 设置 IP {new_ip}/{prefix}")
+        logger.info("用户操作: 设置 IP %s/%s", new_ip, prefix)
         self._run_worker("apply_ip", (new_ip, prefix))
 
     def _on_ip_applied(self, ip: str, prefix: int) -> None:
         self.scanned_ip_label.setText(f"当前网关 IP：{ip}/{prefix}（已应用，请重连）")
-        self._log(f"IP 设置成功: {ip}/{prefix}，请重启网关后用新 IP 扫描并连接")
+        logger.info("IP 设置成功: %s/%s，请重启网关后重连", ip, prefix)
         QMessageBox.information(
             self,
             "IP 已应用",
@@ -425,7 +472,7 @@ class MainWindow(QMainWindow):
         )
 
     def _on_worker_failed(self, message: str) -> None:
-        self._log(f"错误: {message}")
+        logger.error("操作失败: %s", message)
         QMessageBox.warning(self, "操作失败", message)
 
     def closeEvent(self, event) -> None:

@@ -59,6 +59,23 @@ pyinstaller --name "周界拦截上位机" --windowed --onefile main.py
 
 生成的可执行文件在 `dist/` 目录。将 `config.yaml` 放在 exe 同级目录便于修改。
 
+## 日志系统
+
+- 界面底部「运行日志」实时显示操作记录
+- 同时写入 `logs/perimeter_client.log`（按天轮转，默认保留 7 天）
+- 点击「打开日志目录」可查看完整日志文件
+- 文件日志默认 `DEBUG`（含 TCP 收发 HEX 帧），界面默认 `INFO`
+
+可在 `config.yaml` 调整：
+
+```yaml
+logging:
+  level: DEBUG      # 文件日志级别
+  ui_level: INFO    # 界面日志级别，调试时可改为 DEBUG
+  directory: logs
+  backup_count: 7
+```
+
 ## 协议文档
 
 详见 [doc/上位机北向TCP协议.md](doc/上位机北向TCP协议.md)。
