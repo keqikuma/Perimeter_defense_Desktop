@@ -48,6 +48,8 @@ class MainWindow(QMainWindow):
 
         self._connected = False
         self._busy = False
+        self._task_in_flight = False
+        self._current_block_ui = False
 
         self._build_ui()
         self._setup_ui_logging()
@@ -55,9 +57,13 @@ class MainWindow(QMainWindow):
         self._set_control_enabled(False)
 
         self._temp_timer = QTimer(self)
-        self._temp_timer.timeout.connect(self._poll_temperature)
+        self._temp_timer.timeout.connect(
+            lambda: self._poll_temperature(background=True)
+        )
         self._status_timer = QTimer(self)
-        self._status_timer.timeout.connect(self._poll_strike_status)
+        self._status_timer.timeout.connect(
+            lambda: self._poll_strike_status(background=True)
+        )
 
     def _setup_worker_signals(self) -> None:
         self._worker.finished.connect(self._on_worker_finished)
@@ -328,16 +334,26 @@ class MainWindow(QMainWindow):
         self._task_bridge.submit.emit("update_config", "", 0, self._config)
         logger.info("配置已保存: %s", path)
 
-    def _run_worker(self, task: str, args: object = None) -> None:
-        if self._busy:
+    def _run_worker(
+        self, task: str, args: object = None, *, block_ui: bool = True
+    ) -> None:
+        if self._task_in_flight:
             return
-        self._set_busy(True)
+
+        self._task_in_flight = True
+        self._current_block_ui = block_ui
+        if block_ui:
+            self._set_busy(True)
+
         host = self.host_input.text().strip()
         port = self.port_input.value()
         self._task_bridge.submit.emit(task, host, port, args)
 
     def _on_worker_finished(self) -> None:
-        self._set_busy(False)
+        self._task_in_flight = False
+        if self._current_block_ui:
+            self._set_busy(False)
+        self._current_block_ui = False
 
     def _on_scan_ip(self) -> None:
         host = self.host_input.text().strip()
@@ -368,7 +384,7 @@ class MainWindow(QMainWindow):
         self._set_control_enabled(True)
         logger.info("网关连接成功，控制面板已解锁")
         self._poll_strike_status()
-        self._poll_temperature()
+        self._poll_temperature(background=True)
         self._temp_timer.start(int(self._config.temperature_poll_interval_sec * 1000))
         self._status_timer.start(int(self._config.status_poll_interval_sec * 1000))
 
@@ -413,36 +429,42 @@ class MainWindow(QMainWindow):
         logger.info("用户操作: 打击关闭")
         self._run_worker("strike_off")
 
-    def _poll_strike_status(self) -> None:
-        if not self._connected or self._busy:
+    def _poll_strike_status(self, *, background: bool = False) -> None:
+        if not self._connected:
             return
-        self._run_worker("query_strike")
+        self._run_worker("query_strike", block_ui=not background)
 
     def _on_strike_changed(self, is_on: bool) -> None:
         if is_on:
-            self.strike_light.set_state(StatusLight.ON)
-            self.strike_text.setText("打击已开启")
-            self.strike_text.setStyleSheet("color: #2E7D32; font-weight: bold;")
+            new_text = "打击已开启"
+            new_state = StatusLight.ON
+            new_style = "color: #2E7D32; font-weight: bold;"
         else:
-            self.strike_light.set_state(StatusLight.OFF)
-            self.strike_text.setText("打击已关闭")
-            self.strike_text.setStyleSheet("color: #C62828; font-weight: bold;")
-        state = "开启" if is_on else "关闭"
-        logger.debug("界面更新打击状态: %s", state)
+            new_text = "打击已关闭"
+            new_state = StatusLight.OFF
+            new_style = "color: #C62828; font-weight: bold;"
+
+        if self.strike_text.text() != new_text:
+            self.strike_light.set_state(new_state)
+            self.strike_text.setText(new_text)
+            self.strike_text.setStyleSheet(new_style)
+            logger.debug("界面更新打击状态: %s", "开启" if is_on else "关闭")
 
     def _set_strike_unknown(self) -> None:
         self.strike_light.set_state(StatusLight.UNKNOWN)
         self.strike_text.setText("未知")
         self.strike_text.setStyleSheet("color: #757575;")
 
-    def _poll_temperature(self) -> None:
-        if not self._connected or self._busy:
+    def _poll_temperature(self, *, background: bool = False) -> None:
+        if not self._connected:
             return
-        self._run_worker("query_temperature")
+        self._run_worker("query_temperature", block_ui=not background)
 
     def _on_temperature_updated(self, temp: float) -> None:
-        self.temp_label.setText(f"{temp:.1f}")
-        logger.debug("界面更新温度: %.1f ℃", temp)
+        text = f"{temp:.1f}"
+        if self.temp_label.text() != text:
+            self.temp_label.setText(text)
+            logger.debug("界面更新温度: %s ℃", text)
 
     def _on_apply_ip(self) -> None:
         new_ip = self.new_ip_input.text().strip()
@@ -473,7 +495,8 @@ class MainWindow(QMainWindow):
 
     def _on_worker_failed(self, message: str) -> None:
         logger.error("操作失败: %s", message)
-        QMessageBox.warning(self, "操作失败", message)
+        if self._current_block_ui:
+            QMessageBox.warning(self, "操作失败", message)
 
     def closeEvent(self, event) -> None:
         self._temp_timer.stop()

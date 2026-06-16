@@ -207,7 +207,7 @@ class GatewayClient:
         if status is None:
             logger.error("无法解析打击状态，PAYLOAD=%s", format_hex(frame.payload))
             raise GatewayError("无法解析打击状态", frame)
-        logger.info("打击状态: %s", "开启" if status else "关闭")
+        logger.debug("打击状态: %s", "开启" if status else "关闭")
         return status
 
     def query_temperature(self) -> float:
@@ -216,7 +216,7 @@ class GatewayClient:
         if temp is None:
             logger.error("无法解析温度，PAYLOAD=%s", format_hex(frame.payload))
             raise GatewayError("无法解析温度数据", frame)
-        logger.info("设备仓温度: %.1f ℃", temp)
+        logger.debug("设备仓温度: %.1f ℃", temp)
         return temp
 
     def ac_on(self) -> bytes:

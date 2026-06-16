@@ -50,7 +50,10 @@ class GatewayWorker(QObject):
         if port > 0:
             self._port = port
 
-        logger.info("开始任务: %s host=%s port=%s", task, host or self._host, port or self._port)
+        if task in {"query_strike", "query_temperature"}:
+            logger.debug("开始任务: %s host=%s port=%s", task, host or self._host, port or self._port)
+        else:
+            logger.info("开始任务: %s host=%s port=%s", task, host or self._host, port or self._port)
 
         if task == "update_config":
             self._apply_config(args)
