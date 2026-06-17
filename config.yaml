@@ -4,6 +4,7 @@ connection:
 timeouts:
   connect_sec: 5.0
   response_sec: 15.0
+  ip_set_sec: 30.0
 polling:
   temperature_sec: 3.0
   status_sec: 5.0

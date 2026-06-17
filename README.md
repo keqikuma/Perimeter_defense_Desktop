@@ -48,7 +48,15 @@ polling:
 3. 点击 **连接**，建立 TCP 长连接
 4. 连接后可进行打击控制、温度监测、IP 修改
 
-> 修改网关 IP 后需重启 `perimeter-gateway`，再用新 IP 扫描并连接。
+> 修改网关 IP 后需重启 `perimeter-gateway`，再用新 IP **读取配置 IP** 并连接。  
+> 若改 IP 后连接中断但未收到明确失败，上位机会提示「结果待确认」。
+
+## 修改网关 IP 流程
+
+1. 连接网关后，在「网关 IP 配置」填写新 IP 和掩码（如 `/24`）
+2. 点击「应用新 IP」
+3. 在开发板执行：`sudo systemctl restart perimeter-gateway`
+4. 点击「读取配置 IP」确认，再「连接」
 
 ## Windows 打包
 

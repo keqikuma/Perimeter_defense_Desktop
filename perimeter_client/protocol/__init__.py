@@ -4,6 +4,7 @@ from perimeter_client.protocol.payload import (
     encode_ip_payload,
     parse_signal_status,
     parse_temperature,
+    validate_gateway_ip,
 )
 
 __all__ = [
@@ -15,4 +16,5 @@ __all__ = [
     "encode_ip_payload",
     "parse_signal_status",
     "parse_temperature",
+    "validate_gateway_ip",
 ]

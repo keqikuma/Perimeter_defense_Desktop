@@ -30,10 +30,22 @@ def parse_temperature(payload: bytes) -> float | None:
     return raw - 40
 
 
-def encode_ip_payload(ip: str, prefix_len: int) -> bytes:
+def validate_gateway_ip(ip: str, prefix_len: int) -> None:
+    """本地校验网关 IP 参数，与网关 validateBoardIP 规则一致。"""
     addr = ipaddress.IPv4Address(ip)
-    if not 0 <= prefix_len <= 32:
-        raise ValueError("掩码长度须在 0~32 之间")
+    if int(addr) == 0:
+        raise ValueError("IP 地址不可用（0.0.0.0）")
+    if addr.is_loopback:
+        raise ValueError("不可使用 loopback 地址（127.x.x.x）")
+    if addr.is_multicast:
+        raise ValueError("不可使用组播地址（224~239.x.x.x）")
+    if not 1 <= prefix_len <= 32:
+        raise ValueError("掩码长度须为 1~32")
+
+
+def encode_ip_payload(ip: str, prefix_len: int) -> bytes:
+    validate_gateway_ip(ip, prefix_len)
+    addr = ipaddress.IPv4Address(ip)
     return addr.packed + bytes([prefix_len])
 
 

@@ -17,6 +17,7 @@ class AppConfig:
     port: int = 9000
     connect_timeout_sec: float = 5.0
     response_timeout_sec: float = 15.0
+    ip_set_timeout_sec: float = 30.0
     temperature_poll_interval_sec: float = 3.0
     status_poll_interval_sec: float = 5.0
     log_level: str = "DEBUG"
@@ -39,6 +40,9 @@ class AppConfig:
             response_timeout_sec=float(
                 timeouts.get("response_sec", cls.response_timeout_sec)
             ),
+            ip_set_timeout_sec=float(
+                timeouts.get("ip_set_sec", cls.ip_set_timeout_sec)
+            ),
             temperature_poll_interval_sec=float(
                 polling.get("temperature_sec", cls.temperature_poll_interval_sec)
             ),
@@ -59,6 +63,7 @@ class AppConfig:
             "timeouts": {
                 "connect_sec": self.connect_timeout_sec,
                 "response_sec": self.response_timeout_sec,
+                "ip_set_sec": self.ip_set_timeout_sec,
             },
             "polling": {
                 "temperature_sec": self.temperature_poll_interval_sec,

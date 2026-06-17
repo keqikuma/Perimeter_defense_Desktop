@@ -180,7 +180,13 @@ AA 55 01 21 00 00 05 C0 A8 01 C9 18 <CRC16>
                         ^^^^^ LEN=5
 ```
 
-> **注意：** 设置 IP 成功后，systemd-networkd 会应用新地址，但网关进程仍绑定在**旧 IP** 上监听 `9000` 端口。需执行 `systemctl restart perimeter-gateway`，上位机再用**新 IP** 重连。
+**查询 IP 数据来源（0x21）：**
+
+1. 优先读取 `eth1.network` 配置文件中的 `Address=x.x.x.x/yy`（IP 与 prefix 同源）
+2. 文件不存在或解析失败时，回退到网卡当前 IPv4 地址与掩码
+3. 再回退时默认 prefix 为 `/24`
+
+> **注意：** 设置 IP 成功后，systemd-networkd 会应用新地址，但网关进程仍绑定在**旧 IP** 上监听 `9000` 端口。需执行 `systemctl restart perimeter-gateway`，上位机再用**新 IP** 重连。若 `networkctl` 应用失败，网关会**回滚** `eth1.network` 并返回 `STATUS=0x05`。
 
 ---
 
@@ -356,3 +362,4 @@ printf '\xAA\x55\x01\x20\x00\x05\xC0\xA8\x01\x64\x18\x56\x5E' | nc -q2 192.168.1
 |------|------|------|
 | 1.0 | 2026-06-09 | 初始版本，8 条指令，HEX 长连接 |
 | 1.1 | 2026-06-09 | 新增 0x20/0x21 eth1 IP 设置与查询 |
+| 1.2 | 2026-06-15 | 0x21 优先读配置文件；0x20 失败回滚；参数错误返回 0x01 |

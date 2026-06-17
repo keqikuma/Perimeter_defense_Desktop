@@ -24,6 +24,7 @@ class GatewayWorker(QObject):
     disconnected = pyqtSignal()
     ip_scanned = pyqtSignal(str, int)
     ip_applied = pyqtSignal(str, int)
+    ip_apply_uncertain = pyqtSignal(str, int)
     strike_changed = pyqtSignal(bool)
     temperature_updated = pyqtSignal(float)
     command_done = pyqtSignal(str, str)
@@ -209,7 +210,18 @@ class GatewayWorker(QObject):
             new_ip, new_prefix = self._client.set_gateway_ip(ip, prefix_len)
             self.ip_applied.emit(new_ip, new_prefix)
         except GatewayError as exc:
-            logger.error("任务失败: %s", exc)
-            self.failed.emit(str(exc))
+            if GatewayError.is_uncertain_set_ip_failure(exc):
+                logger.warning("设置 IP 后连接中断，结果待确认: %s/%s", ip, prefix_len)
+                self.ip_apply_uncertain.emit(ip, prefix_len)
+            else:
+                message = self._format_gateway_error(exc)
+                logger.error("任务失败: %s", message)
+                self.failed.emit(message)
         finally:
             self.finished.emit()
+
+    @staticmethod
+    def _format_gateway_error(exc: GatewayError) -> str:
+        if exc.response is not None and exc.status is not None:
+            return f"STATUS=0x{exc.status:02X} {GatewayError.user_message(exc.response)}"
+        return str(exc)

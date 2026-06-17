@@ -7,7 +7,13 @@ import threading
 
 from perimeter_client.config import AppConfig
 from perimeter_client.logging import format_hex, get_logger
-from perimeter_client.protocol.frame import Command, FrameBuffer, ResponseFrame, build_request
+from perimeter_client.protocol.frame import (
+    Command,
+    FrameBuffer,
+    ResponseFrame,
+    Status,
+    build_request,
+)
 from perimeter_client.protocol.names import cmd_name
 from perimeter_client.protocol.payload import (
     decode_ip_payload,
@@ -23,6 +29,29 @@ class GatewayError(Exception):
     def __init__(self, message: str, response: ResponseFrame | None = None) -> None:
         super().__init__(message)
         self.response = response
+        self.status = response.status if response else None
+
+    @classmethod
+    def user_message(cls, response: ResponseFrame) -> str:
+        if response.status == Status.PARAM_ERROR:
+            return (
+                "参数错误：IP 或掩码不合法"
+                "（如 loopback、组播、掩码须 1~32）"
+            )
+        if response.status == Status.NETWORK_CONFIG_FAILED:
+            return "网络配置失败：网关未能应用 IP，配置已回滚，IP 未改变"
+        return response.status_name
+
+    @staticmethod
+    def is_uncertain_set_ip_failure(exc: "GatewayError") -> bool:
+        """改 IP 后连接中断且未收到明确失败 STATUS，可能已成功。"""
+        if exc.response is not None:
+            return False
+        message = str(exc)
+        return any(
+            keyword in message
+            for keyword in ("连接已断开", "通信异常", "等待响应超时")
+        )
 
 
 class GatewayClient:
@@ -161,7 +190,7 @@ class GatewayClient:
                         cmd_name(frame.cmd),
                         frame.status_name,
                     )
-                    raise GatewayError(frame.status_name, frame)
+                    raise GatewayError(GatewayError.user_message(frame), frame)
                 return frame
 
     def query_gateway_ip(self, host: str, port: int) -> tuple[str, int]:
@@ -178,7 +207,18 @@ class GatewayClient:
     def set_gateway_ip(self, ip: str, prefix_len: int) -> tuple[str, int]:
         payload = encode_ip_payload(ip, prefix_len)
         logger.info("设置网关 IP: %s/%d", ip, prefix_len)
-        frame = self.send_command(Command.SET_IP, payload)
+
+        previous_timeout: float | None = None
+        if self._sock is not None:
+            previous_timeout = self._sock.gettimeout()
+            self._sock.settimeout(self._config.ip_set_timeout_sec)
+
+        try:
+            frame = self._exchange(Command.SET_IP, payload)
+        finally:
+            if self._sock is not None and previous_timeout is not None:
+                self._sock.settimeout(previous_timeout)
+
         new_ip, new_prefix = decode_ip_payload(frame.payload)
         logger.info("设置网关 IP 成功: %s/%d", new_ip, new_prefix)
         return new_ip, new_prefix

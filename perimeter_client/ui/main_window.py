@@ -24,6 +24,7 @@ from PyQt6.QtWidgets import (
 from perimeter_client.config import AppConfig, load_config, save_config
 from perimeter_client.logging import get_logger, log_file_path
 from perimeter_client.paths import app_base_dir
+from perimeter_client.protocol.payload import validate_gateway_ip
 from perimeter_client.ui.log_handler import LogEmitter, QtLogHandler
 from perimeter_client.ui.widgets import StatusLight
 from perimeter_client.ui.worker import GatewayWorker, TaskBridge
@@ -72,6 +73,7 @@ class MainWindow(QMainWindow):
         self._worker.disconnected.connect(self._on_disconnected)
         self._worker.ip_scanned.connect(self._on_ip_scanned)
         self._worker.ip_applied.connect(self._on_ip_applied)
+        self._worker.ip_apply_uncertain.connect(self._on_ip_apply_uncertain)
         self._worker.strike_changed.connect(self._on_strike_changed)
         self._worker.temperature_updated.connect(self._on_temperature_updated)
         self._worker.command_done.connect(self._on_command_done)
@@ -122,7 +124,7 @@ class MainWindow(QMainWindow):
         layout.addRow("网关地址", row_host)
 
         btn_row = QHBoxLayout()
-        self.scan_btn = QPushButton("扫描当前 IP")
+        self.scan_btn = QPushButton("读取配置 IP")
         self.scan_btn.clicked.connect(self._on_scan_ip)
         btn_row.addWidget(self.scan_btn)
 
@@ -140,11 +142,15 @@ class MainWindow(QMainWindow):
         layout.addRow(btn_row)
 
         self.conn_status_label = QLabel("未连接")
-        self.scanned_ip_label = QLabel("当前网关 IP：--")
+        self.scanned_ip_label = QLabel("配置 IP：--")
         layout.addRow("连接状态", self.conn_status_label)
         layout.addRow("", self.scanned_ip_label)
 
-        hint = QLabel("流程：先扫描当前 IP → 确认地址后点击连接 → 方可控制与修改 IP")
+        hint = QLabel(
+            "流程：读取配置 IP → 确认地址后点击连接 → 方可控制与修改 IP\n"
+            "读取的是网关 eth1.network 配置文件中的 IP；"
+            "若刚修改 IP 尚未重启 gateway，请以重启后读取结果为准。"
+        )
         hint.setWordWrap(True)
         hint.setStyleSheet("color: #666;")
         layout.addRow(hint)
@@ -240,18 +246,23 @@ class MainWindow(QMainWindow):
         row.addWidget(self.new_ip_input)
 
         self.prefix_input = QSpinBox()
-        self.prefix_input.setRange(0, 32)
+        self.prefix_input.setRange(1, 32)
         self.prefix_input.setValue(24)
         row.addWidget(QLabel("/"))
         row.addWidget(self.prefix_input)
         layout.addRow("新 IP 地址", row)
+
+        prefix_hint = QLabel("/24 表示子网掩码 255.255.255.0")
+        prefix_hint.setStyleSheet("color: #666;")
+        layout.addRow("", prefix_hint)
 
         self.apply_ip_btn = QPushButton("应用新 IP")
         self.apply_ip_btn.clicked.connect(self._on_apply_ip)
         layout.addRow(self.apply_ip_btn)
 
         note = QLabel(
-            "设置成功后网关需重启服务，请用新 IP 重新扫描并连接。"
+            "设置成功后请在开发板执行 systemctl restart perimeter-gateway，"
+            "再用新 IP 读取配置并连接。"
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #B71C1C;")
@@ -297,6 +308,7 @@ class MainWindow(QMainWindow):
             log_ui_level=self._config.log_ui_level,
             log_directory=self._config.log_directory,
             log_backup_count=self._config.log_backup_count,
+            ip_set_timeout_sec=self._config.ip_set_timeout_sec,
         )
 
     def _on_open_log_dir(self) -> None:
@@ -360,14 +372,14 @@ class MainWindow(QMainWindow):
         if not host:
             QMessageBox.warning(self, "提示", "请先填写网关地址")
             return
-        logger.info("正在扫描网关 IP: %s:%s", host, self.port_input.value())
+        logger.info("正在读取配置 IP: %s:%s", host, self.port_input.value())
         self._run_worker("scan_ip")
 
     def _on_ip_scanned(self, ip: str, prefix: int) -> None:
-        text = f"当前网关 IP：{ip}/{prefix}"
+        text = f"配置 IP：{ip}/{prefix}（来自 eth1.network）"
         self.scanned_ip_label.setText(text)
         self.host_input.setText(ip)
-        logger.info("扫描成功: %s/%s", ip, prefix)
+        logger.info("读取配置 IP 成功: %s/%s", ip, prefix)
 
     def _on_connect(self) -> None:
         host = self.host_input.text().strip()
@@ -472,31 +484,85 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "提示", "请填写新 IP 地址")
             return
         prefix = self.prefix_input.value()
+        try:
+            validate_gateway_ip(new_ip, prefix)
+        except ValueError as exc:
+            QMessageBox.warning(self, "参数错误", str(exc))
+            return
         reply = QMessageBox.question(
             self,
             "确认修改 IP",
-            f"确定将网关 eth1 设置为 {new_ip}/{prefix} 吗？\n"
-            "成功后需重启网关服务，并用新 IP 重新连接。",
+            f"确定将网关 eth1 设置为 {new_ip}/{prefix} 吗？\n\n"
+            "注意：\n"
+            "• 改 IP 后当前 TCP 连接会断开\n"
+            "• 需在开发板执行 systemctl restart perimeter-gateway\n"
+            "• 然后用新 IP 重新读取配置并连接",
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
         logger.info("用户操作: 设置 IP %s/%s", new_ip, prefix)
         self._run_worker("apply_ip", (new_ip, prefix))
 
+    def _finalize_ip_change(self, ip: str, prefix: int, *, uncertain: bool) -> None:
+        self._temp_timer.stop()
+        self._status_timer.stop()
+        self._connected = False
+        self.conn_status_label.setText("未连接")
+        self.conn_status_label.setStyleSheet("")
+        self._set_strike_unknown()
+        self.temp_label.setText("--")
+        self._set_control_enabled(False)
+
+        self.host_input.setText(ip)
+        self._config.host = ip
+        save_config(self._config)
+
+        status = "待确认" if uncertain else "已应用"
+        self.scanned_ip_label.setText(
+            f"配置 IP：{ip}/{prefix}（{status}，请重启 gateway 后重连）"
+        )
+        self._task_bridge.submit.emit("disconnect", "", 0, None)
+
     def _on_ip_applied(self, ip: str, prefix: int) -> None:
-        self.scanned_ip_label.setText(f"当前网关 IP：{ip}/{prefix}（已应用，请重连）")
-        logger.info("IP 设置成功: %s/%s，请重启网关后重连", ip, prefix)
+        self._finalize_ip_change(ip, prefix, uncertain=False)
+        logger.info("IP 设置成功: %s/%s", ip, prefix)
         QMessageBox.information(
             self,
             "IP 已应用",
-            f"网关 IP 已设置为 {ip}/{prefix}。\n"
-            "请重启 perimeter-gateway 服务，再用新 IP 扫描并连接。",
+            f"网关 IP 已设置为 {ip}/{prefix}。\n\n"
+            "请按以下步骤操作：\n"
+            "1. 在开发板执行：sudo systemctl restart perimeter-gateway\n"
+            "2. 等待服务重启（约 5~10 秒）\n"
+            "3. 点击「读取配置 IP」确认，再「连接」",
         )
+
+    def _on_ip_apply_uncertain(self, ip: str, prefix: int) -> None:
+        self._finalize_ip_change(ip, prefix, uncertain=True)
+        logger.warning("IP 设置结果待确认: %s/%s", ip, prefix)
+        QMessageBox.warning(
+            self,
+            "连接中断，请验证",
+            f"连接已中断（改 IP 后常见），未能确认网关是否返回成功。\n\n"
+            f"请等待约 10 秒后，用新 IP {ip}/{prefix} 点击「读取配置 IP」"
+            "确认是否生效。\n\n"
+            "若未生效，请在开发板上执行：\n"
+            "sudo systemctl restart perimeter-gateway\n"
+            "然后重试。",
+        )
+
+    def _error_dialog_title(self, message: str) -> str:
+        if "STATUS=0x01" in message or "参数错误" in message:
+            return "参数错误"
+        if "STATUS=0x05" in message or "配置已回滚" in message:
+            return "网络配置失败"
+        if "连接已中断" in message or "连接已断开" in message:
+            return "连接中断"
+        return "操作失败"
 
     def _on_worker_failed(self, message: str) -> None:
         logger.error("操作失败: %s", message)
         if self._current_block_ui:
-            QMessageBox.warning(self, "操作失败", message)
+            QMessageBox.warning(self, self._error_dialog_title(message), message)
 
     def closeEvent(self, event) -> None:
         self._temp_timer.stop()
